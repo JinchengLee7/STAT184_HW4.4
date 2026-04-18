@@ -1,0 +1,374 @@
+---
+title: "Wine Quality Prediction Analysis"
+subtitle: "Combined Red and White Wine Regression Analysis"
+author: "Jincheng Li"
+date: 4-18-2026
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    colorlinks: true
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: visual
+---
+
+# Executive Summary
+
+## Overview
+
+This report analyzes the **UCI Wine Quality** dataset to study how physicochemical properties relate to wine quality scores.[1](https://archive.ics.uci.edu/dataset/186/wine+quality "Wine Quality - UCI Machine Learning Repository") The analysis combines the red and white wine datasets into one file, adds a binary indicator for wine type, and applies a multiple linear regression workflow to identify important predictors of quality. The report emphasizes a clear modeling pipeline built around data preparation, exploratory analysis, full-model estimation, AIC-based model selection, and comparison across wine types.
+
+## Key Findings Preview
+
+The combined dataset contains both red and white vinho verde wine samples and supports a regression-based analysis because `quality` is recorded as a numeric score.[1](https://archive.ics.uci.edu/dataset/186/wine+quality "Wine Quality - UCI Machine Learning Repository") The main modeling workflow in this draft uses a full OLS model and a reduced model selected through backward AIC. I also estimate separate models for red and white wines so that differences in predictor patterns can be compared across wine types.
+
+# Setup and Data Loading
+
+## Load Packages
+
+```{r}
+#| label: load-packages
+
+# Load the packages used for data manipulation, visualization, tables, and modeling.
+library(tidyverse)
+library(knitr)
+library(broom)
+library(gridExtra)
+```
+
+## Read and Merge Data
+
+```{r}
+#| label: load-data
+#| tbl-cap: "Dimensions of the red, white, and combined wine datasets"
+
+# Read the red wine dataset from the repository.
+red_wine <- read.csv("data/raw/winequality-red.csv", sep = ";")
+
+# Read the white wine dataset from the repository.
+white_wine <- read.csv("data/raw/winequality-white.csv", sep = ";")
+
+# Add a binary indicator for wine type.
+red_wine$white <- 0
+white_wine$white <- 1
+
+# Combine the datasets into a single analysis file.
+wine_data <- rbind(red_wine, white_wine)
+
+# Standardize column names for easier modeling and code readability.
+names(wine_data) <- gsub(" ", ".", names(wine_data))
+
+# Create a labeled factor version of wine type for plotting and summaries.
+wine_data$wine_type <- factor(
+  wine_data$white,
+  levels = c(0, 1),
+  labels = c("Red", "White")
+)
+
+# Summarize the dimensions of each dataset.
+dimension_table <- data.frame(
+  Dataset = c("Red Wine", "White Wine", "Combined Wine"),
+  Rows = c(nrow(red_wine), nrow(white_wine), nrow(wine_data)),
+  Columns = c(ncol(red_wine), ncol(white_wine), ncol(wine_data))
+)
+
+kable(dimension_table, caption = "Dataset dimensions")
+```
+
+The merged file allows me to study overall quality patterns while keeping wine type explicitly represented in the model. This mirrors a practical workflow in which I want both a combined model and type-specific comparisons.
+
+## Data Structure
+
+```{r}
+#| label: data-structure
+#| tbl-cap: "Missing values by variable in the combined dataset"
+
+# Display the structure of the combined dataset.
+str(wine_data)
+
+# Summarize missing values for each variable.
+missing_table <- data.frame(
+  variable = names(wine_data),
+  missing_values = colSums(is.na(wine_data))
+)
+
+kable(missing_table, caption = "Missing-value check")
+```
+
+The dataset is well suited for direct modeling because the variables are already numeric and the missing-value check confirms whether additional cleaning is necessary before fitting regression models.
+
+# Exploratory Data Analysis
+
+## Quality Distribution
+
+```{r}
+#| label: quality-distribution
+#| fig-cap: "Overall and wine-type-specific distributions of wine quality"
+#| fig-alt: "Two-panel display with an overall quality distribution and a wine-type-specific quality distribution for the combined wine dataset"
+
+# Plot the overall quality distribution.
+p1 <- ggplot(wine_data, aes(x = quality)) +
+  geom_bar(fill = "steelblue", alpha = 0.8, color = "black") +
+  labs(
+    title = "Overall Quality Distribution",
+    x = "Quality Score",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Plot the quality distribution by wine type.
+p2 <- ggplot(wine_data, aes(x = quality, fill = wine_type)) +
+  geom_bar(position = "dodge", alpha = 0.8, color = "black") +
+  scale_fill_manual(values = c("Red" = "#8B0000", "White" = "#FFD700")) +
+  labs(
+    title = "Quality Distribution by Wine Type",
+    x = "Quality Score",
+    y = "Count",
+    fill = "Wine Type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom"
+  )
+
+# Arrange the two plots side by side.
+grid.arrange(p1, p2, ncol = 2)
+```
+
+These plots show how quality scores are distributed in the full sample and how the distribution changes across red and white wines. This is useful because it clarifies whether the combined dataset masks visible differences between wine types.
+
+## Quality Statistics by Wine Type
+
+```{r}
+#| label: quality-stats
+#| tbl-cap: "Quality statistics by wine type"
+
+# Summarize the response variable separately for red and white wines.
+quality_stats <- wine_data %>%
+  group_by(wine_type) %>%
+  summarise(
+    n = n(),
+    Mean = mean(quality),
+    SD = sd(quality),
+    Median = median(quality),
+    Min = min(quality),
+    Max = max(quality),
+    .groups = "drop"
+  )
+
+kable(quality_stats, digits = 2, caption = "Quality statistics by wine type")
+```
+
+This summary provides a compact comparison of central tendency and variation in wine quality across the two wine groups.
+
+## Correlation Analysis
+
+```{r}
+#| label: correlation-analysis
+#| tbl-cap: "Correlations between selected predictors and quality"
+
+# Keep only numeric variables for the correlation analysis.
+numeric_vars <- wine_data %>%
+  select(-wine_type, -white) %>%
+  select(where(is.numeric))
+
+# Compute correlations with the response variable.
+correlation_table <- data.frame(
+  Variable = names(numeric_vars),
+  Correlation_with_Quality = sapply(numeric_vars, function(x) cor(x, wine_data$quality))
+) %>%
+  filter(Variable != "quality") %>%
+  arrange(desc(abs(Correlation_with_Quality)))
+
+kable(correlation_table, digits = 3, caption = "Correlations with wine quality")
+```
+
+The correlation results provide a first look at which variables move most strongly with wine quality before controlling for the other predictors in a regression framework.
+
+## Alcohol and Quality
+
+```{r}
+#| label: alcohol-quality-plot
+#| fig-cap: "Relationship between alcohol and wine quality"
+#| fig-alt: "Scatterplot of alcohol against wine quality with a fitted linear trend line"
+
+# Visualize one of the most important predictors against the response variable.
+ggplot(wine_data, aes(x = alcohol, y = quality)) +
+  geom_point(alpha = 0.25, color = "darkred") +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(
+    title = "Alcohol and Wine Quality",
+    x = "Alcohol",
+    y = "Quality"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+This plot illustrates the direction and rough strength of the relationship between alcohol content and quality, which is often one of the more visible associations in wine-quality analyses.
+
+# Traditional OLS Regression Pipeline
+
+## Full Model with All Predictors
+
+```{r}
+#| label: full-model
+
+# Fit the full OLS model using all predictors except the labeled factor version of wine type.
+full_model <- lm(quality ~ . - wine_type, data = wine_data)
+
+# Display the complete model summary.
+summary(full_model)
+```
+
+The full model estimates the partial effect of each physicochemical measure on wine quality while holding the other variables constant. This serves as the main baseline model for the report.
+
+```{r}
+#| label: significant-predictors
+#| tbl-cap: "Significant predictors from the full model"
+
+# Extract the coefficient table from the full model.
+coef_table <- summary(full_model)$coefficients
+
+# Keep statistically significant predictors other than the intercept.
+sig_predictors <- data.frame(
+  Predictor = rownames(coef_table),
+  Estimate = coef_table[, 1],
+  Std_Error = coef_table[, 2],
+  t_value = coef_table[, 3],
+  p_value = coef_table[, 4]
+) %>%
+  filter(Predictor != "(Intercept)", p_value < 0.05)
+
+kable(sig_predictors, digits = 4, caption = "Significant predictors in the full model")
+```
+
+This table identifies the predictors that remain statistically associated with quality after adjustment for the rest of the model.
+
+## AIC Backward Selection
+
+```{r}
+#| label: aic-selection
+
+# Run backward AIC selection starting from the full model.
+ols_final <- step(full_model, direction = "backward", trace = 0)
+
+# Display the summary of the reduced model.
+summary(ols_final)
+```
+
+```{r}
+#| label: model-selection-summary
+#| tbl-cap: "Variables retained and removed by backward AIC selection"
+
+# Identify which predictors were retained and removed.
+full_vars <- names(coef(full_model))[-1]
+final_vars <- names(coef(ols_final))[-1]
+removed_vars <- setdiff(full_vars, final_vars)
+
+selection_table <- tibble(
+  status = c(rep("Retained", length(final_vars)), rep("Removed", length(removed_vars))),
+  variable = c(final_vars, removed_vars)
+)
+
+kable(selection_table, caption = "Backward AIC selection results")
+```
+
+Backward AIC selection simplifies the full specification by removing variables that contribute less to model fit under this criterion. The reduced model is often easier to interpret while still preserving the main predictive structure.
+
+## Reduced Model Coefficients
+
+```{r}
+#| label: reduced-model-coefficients
+#| tbl-cap: "Coefficient estimates for the reduced OLS model"
+
+# Tidy the reduced model coefficients for presentation.
+reduced_model_table <- tidy(ols_final, conf.int = TRUE)
+
+kable(reduced_model_table, digits = 4, caption = "Reduced model coefficient estimates")
+```
+
+This coefficient table supports interpretation of the final selected model by presenting effect estimates together with confidence intervals.
+
+## Full and Reduced Model Comparison
+
+```{r}
+#| label: model-comparison
+#| tbl-cap: "ANOVA comparison of the full and reduced models"
+
+# Compare the reduced and full models directly.
+model_comparison <- anova(ols_final, full_model)
+
+kable(model_comparison, digits = 4, caption = "Model comparison using ANOVA")
+```
+
+```{r}
+#| label: fit-statistics
+#| tbl-cap: "Fit statistics for the full and reduced models"
+
+# Summarize major fit statistics for both models.
+fit_summary <- data.frame(
+  Model = c("Full Model", "Reduced Model"),
+  AIC = c(AIC(full_model), AIC(ols_final)),
+  BIC = c(BIC(full_model), BIC(ols_final)),
+  Adjusted_R_Squared = c(summary(full_model)$adj.r.squared, summary(ols_final)$adj.r.squared)
+)
+
+kable(fit_summary, digits = 3, caption = "Model fit summary")
+```
+
+These comparisons help determine whether the reduced model provides a reasonable simplification of the full model.
+
+# Wine Type Analysis
+
+## Separate Models for Red and White Wine
+
+```{r}
+#| label: separate-models
+
+# Fit an OLS model for red wine only.
+red_model <- lm(quality ~ . - white, data = red_wine)
+
+# Fit an OLS model for white wine only.
+white_model <- lm(quality ~ . - white, data = white_wine)
+
+# Display compact summaries for both models.
+glance(red_model)
+glance(white_model)
+```
+
+```{r}
+#| label: separate-model-summary
+#| tbl-cap: "Comparison of red and white wine regression models"
+
+# Summarize major fit measures for the wine-type-specific models.
+separate_model_summary <- data.frame(
+  Model = c("Red Wine", "White Wine"),
+  Observations = c(nobs(red_model), nobs(white_model)),
+  Adjusted_R_Squared = c(summary(red_model)$adj.r.squared, summary(white_model)$adj.r.squared),
+  Sigma = c(summary(red_model)$sigma, summary(white_model)$sigma)
+)
+
+kable(separate_model_summary, digits = 3, caption = "Separate model comparison")
+```
+
+Estimating separate models by wine type helps show whether the overall combined model hides different predictor relationships across red and white wines.
+
+# Final Interpretation
+
+The combined-data results show that wine quality can be modeled using physicochemical predictors and that wine type remains an important source of variation in the broader dataset. The full model provides a broad multivariable baseline, while the AIC-selected model offers a simpler structure for interpretation.
+
+The separate red and white wine models also suggest that a pooled analysis is only part of the story. Even when the same variables are available in both datasets, their relative importance may differ across wine types. That makes the combined model useful for an overall summary and the separate models useful for more targeted interpretation.
+
+# Conclusion
+
+This report establishes a clear first-draft regression workflow for the UCI Wine Quality dataset.[1](https://archive.ics.uci.edu/dataset/186/wine+quality "Wine Quality - UCI Machine Learning Repository") The analysis merges the red and white wine files, examines the response distribution, studies predictor relationships, estimates a full OLS model, applies AIC-based backward selection, and compares separate red and white wine models.
+
+The current report provides a solid foundation for the project because it is reproducible, uses relative paths, includes narrative explanation, and keeps the modeling process transparent. It can be extended later with additional validation or assumption-focused sections if needed, but the main regression pipeline is already in place.
+
+# References
