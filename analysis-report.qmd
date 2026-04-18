@@ -1,8 +1,8 @@
 ---
 title: "Wine Quality Prediction Analysis"
 subtitle: "Combined Red and White Wine Regression Analysis"
-author: "Your Name"
-date: last-modified
+author: "Jincheng Li"
+date: 4-18-2026
 format:
   pdf:
     toc: true
