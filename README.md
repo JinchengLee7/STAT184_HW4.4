@@ -50,7 +50,7 @@ This project is intended to be self-contained. Required files should remain insi
 ## Contact Information
 
 Name: **Jincheng Li**  
-Email: **jfl6553@psu.edu**
+Email: **jfl6553@psu.edu**  
 Class: **STAT 184, 26SP, Taught by Shubo Li**
 
 ## References
