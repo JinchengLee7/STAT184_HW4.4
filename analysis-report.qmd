@@ -29,7 +29,7 @@ Because the UCI repository describes `quality` as a numeric score and explicitly
 The analysis uses three raw files stored in the repository through relative paths:
 
 | File                             | Role in the project                    |
-|----------------------------------|----------------------------------------|
+|---------------------------------|---------------------------------------|
 | `data/raw/winequality-red.csv`   | Raw red wine observations              |
 | `data/raw/winequality-white.csv` | Raw white wine observations            |
 | `data/raw/winequality.names`     | Local variable and dataset description |
@@ -47,6 +47,7 @@ This structure keeps the report self-contained. The code reads the data directly
 # This report follows the Tidyverse Style Guide for naming, spacing, and pipe use.
 # Set a seed so cross-validation and any randomized procedures remain reproducible.
 set.seed(462)
+knitr::opts_chunk$set(fig.path = "figs/")
 ```
 
 ## Load Packages
