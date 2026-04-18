@@ -1,0 +1,937 @@
+---
+title: "Wine Quality Prediction Analysis"
+subtitle: "Combined Red and White Wine Regression Analysis"
+author: "Your Name"
+date: last-modified
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    colorlinks: true
+    df-print: kable
+execute:
+  echo: false
+  warning: false
+  message: false
+editor: visual
+---
+
+# Executive Summary
+
+## Overview
+
+This report analyzes the **UCI Wine Quality** dataset to examine how physicochemical measurements relate to wine quality scores.[1](https://archive.ics.uci.edu/dataset/186/wine+quality "Wine Quality - UCI Machine Learning Repository") Following the structure of the full analysis workflow, I merge the red and white wine files, add a binary wine-type indicator, explore the data, fit ordinary least squares regression models, evaluate multicollinearity and diagnostics, and then compare OLS with three shrinkage methods: Ridge, Lasso, and Elastic Net.
+
+Because the UCI repository describes `quality` as a numeric score and explicitly notes that the dataset can be used for regression, a regression framework is an appropriate starting point for this project.[1](https://archive.ics.uci.edu/dataset/186/wine+quality "Wine Quality - UCI Machine Learning Repository") The repository also includes the local file `data/raw/winequality.names`, which serves as the in-repo data dictionary alongside the raw CSV files.
+
+## Dataset
+
+The analysis uses three raw files stored in the repository through relative paths:
+
+| File                             | Role in the project                    |
+|---------------------------------|---------------------------------------|
+| `data/raw/winequality-red.csv`   | Raw red wine observations              |
+| `data/raw/winequality-white.csv` | Raw white wine observations            |
+| `data/raw/winequality.names`     | Local variable and dataset description |
+
+This structure keeps the report self-contained. The code reads the data directly from the repository, while the dataset citation points back to the public UCI source.[1](https://archive.ics.uci.edu/dataset/186/wine+quality "Wine Quality - UCI Machine Learning Repository")
+
+# Setup and Data Loading
+
+## Reproducibility Setup
+
+```{r}
+#| label: setup-and-style
+#| include: false
+
+# This report follows the Tidyverse Style Guide for naming, spacing, and pipe use.
+# Set a seed so cross-validation and any randomized procedures remain reproducible.
+set.seed(462)
+knitr::opts_chunk$set(fig.path = "figs/")
+```
+
+## Load Packages
+
+```{r}
+#| label: load-packages
+
+# Load packages for data handling, modeling, diagnostics, regularization, and tables.
+library(tidyverse)
+library(knitr)
+library(broom)
+library(car)
+library(lmtest)
+library(glmnet)
+library(gridExtra)
+```
+
+## Load and Merge Data
+
+```{r}
+#| label: load-and-merge-data
+#| tbl-cap: "Dimensions of the red, white, and combined wine datasets"
+
+# Read the red wine data from the repository.
+red_wine <- read.csv("data/raw/winequality-red.csv", sep = ";")
+
+# Read the white wine data from the repository.
+white_wine <- read.csv("data/raw/winequality-white.csv", sep = ";")
+
+# Add a binary indicator so the merged file retains wine type.
+red_wine$white <- 0
+white_wine$white <- 1
+
+# Merge the two datasets into one analysis table.
+wine_data <- bind_rows(red_wine, white_wine)
+
+# Standardize column names for cleaner downstream coding.
+names(wine_data) <- gsub(" ", ".", names(wine_data))
+
+# Create a factor version of the wine-type indicator for grouped summaries and plots.
+wine_data$wine_type <- factor(
+  wine_data$white,
+  levels = c(0, 1),
+  labels = c("Red", "White")
+)
+
+# Summarize the dimensions of the source files and merged analysis dataset.
+dataset_dimensions <- tibble(
+  dataset = c("Red wine", "White wine", "Combined"),
+  rows = c(nrow(red_wine), nrow(white_wine), nrow(wine_data)),
+  columns = c(ncol(red_wine), ncol(white_wine), ncol(wine_data))
+)
+
+kable(dataset_dimensions, caption = "Dataset dimensions")
+```
+
+The merged dataset allows me to estimate a pooled model while still retaining wine type as an explicit predictor. That makes it possible to measure overall effects and also check whether the white-versus-red distinction matters after controlling for the chemical variables.
+
+## Data Structure
+
+```{r}
+#| label: data-structure
+#| tbl-cap: "Missing values by variable in the combined dataset"
+
+# Check the structure of the merged dataset.
+str(wine_data)
+
+# Count missing values in each variable.
+missing_values <- tibble(
+  variable = names(wine_data),
+  missing_values = colSums(is.na(wine_data))
+)
+
+kable(missing_values, caption = "Missing-value check")
+```
+
+The data are already numeric and clean enough for immediate modeling. This is useful because it lets the report focus on analysis rather than extensive preprocessing.[1](https://archive.ics.uci.edu/dataset/186/wine+quality "Wine Quality - UCI Machine Learning Repository")
+
+# Exploratory Data Analysis
+
+## Quality Distribution
+
+```{r}
+#| label: quality-distribution
+#| fig-cap: "Overall and wine-type-specific distributions of wine quality"
+#| fig-alt: "Two-panel figure showing the overall distribution of wine quality and the distribution split by red versus white wine"
+
+# Plot the overall distribution of quality scores.
+p_overall_quality <- ggplot(wine_data, aes(x = quality)) +
+  geom_bar(fill = "steelblue", alpha = 0.85, color = "black") +
+  labs(
+    title = "Overall Quality Distribution",
+    x = "Quality score",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Plot the quality distribution by wine type.
+p_quality_by_type <- ggplot(wine_data, aes(x = quality, fill = wine_type)) +
+  geom_bar(position = "dodge", alpha = 0.85, color = "black") +
+  scale_fill_manual(values = c("Red" = "#8B0000", "White" = "#E6BE00")) +
+  labs(
+    title = "Quality Distribution by Wine Type",
+    x = "Quality score",
+    y = "Count",
+    fill = "Wine type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom"
+  )
+
+# Arrange both plots in one figure.
+grid.arrange(p_overall_quality, p_quality_by_type, ncol = 2)
+```
+
+The quality distributions show that the response variable is concentrated in the middle score range rather than being evenly spread across all possible values. The grouped version also shows that red and white wines are not distributed identically, which reinforces the value of including a wine-type indicator in the pooled model.
+
+## Quality Statistics by Wine Type
+
+```{r}
+#| label: quality-statistics-by-type
+#| tbl-cap: "Descriptive statistics of quality by wine type"
+
+# Summarize the quality variable separately for red and white wine.
+quality_statistics <- wine_data %>%
+  group_by(wine_type) %>%
+  summarise(
+    n = n(),
+    mean_quality = mean(quality),
+    sd_quality = sd(quality),
+    median_quality = median(quality),
+    min_quality = min(quality),
+    max_quality = max(quality),
+    .groups = "drop"
+  )
+
+kable(quality_statistics, digits = 2, caption = "Quality statistics by wine type")
+```
+
+This summary provides a direct comparison of the response variable across wine types. It helps establish whether mean quality and variability differ before moving into multivariable modeling.
+
+## Correlation Analysis
+
+```{r}
+#| label: correlation-analysis
+#| tbl-cap: "Correlations between predictors and wine quality"
+
+# Restrict to numeric variables for correlation analysis.
+numeric_data <- wine_data %>%
+  select(where(is.numeric))
+
+# Compute correlations between each predictor and quality.
+correlation_table <- tibble(
+  predictor = names(numeric_data),
+  correlation_with_quality = sapply(numeric_data, function(x) cor(x, wine_data$quality))
+) %>%
+  filter(predictor != "quality") %>%
+  arrange(desc(abs(correlation_with_quality)))
+
+kable(correlation_table, digits = 3, caption = "Correlations with wine quality")
+```
+
+The correlation table gives a first-pass view of the strongest bivariate relationships. It is not a substitute for regression, but it does help identify which variables are most likely to remain important in the multivariable models.
+
+## Highly Correlated Predictor Pairs
+
+```{r}
+#| label: highly-correlated-pairs
+#| tbl-cap: "Highly correlated predictor pairs in the combined dataset"
+
+# Remove response and factor-style columns before searching for highly correlated predictors.
+predictor_matrix <- wine_data %>%
+  select(-quality, -wine_type) %>%
+  select(where(is.numeric))
+
+# Compute the correlation matrix for predictors only.
+predictor_correlations <- cor(predictor_matrix)
+
+# Convert the upper triangle of the correlation matrix into a long table.
+high_correlation_pairs <- as.data.frame(as.table(predictor_correlations)) %>%
+  rename(var_1 = Var1, var_2 = Var2, correlation = Freq) %>%
+  filter(var_1 != var_2) %>%
+  mutate(pair_key = map2_chr(var_1, var_2, ~ paste(sort(c(.x, .y)), collapse = "__"))) %>%
+  distinct(pair_key, .keep_all = TRUE) %>%
+  filter(abs(correlation) >= 0.60) %>%
+  select(var_1, var_2, correlation) %>%
+  arrange(desc(abs(correlation)))
+
+kable(high_correlation_pairs, digits = 3, caption = "Predictor pairs with |correlation| >= 0.60")
+```
+
+Strong correlations among predictors do not automatically invalidate OLS, but they do raise the possibility of multicollinearity. That is why the formal VIF check later in the report is an important complement to this exploratory step.
+
+## Alcohol and Quality
+
+```{r}
+#| label: alcohol-and-quality
+#| fig-cap: "Relationship between alcohol content and wine quality"
+#| fig-alt: "Scatterplot of alcohol content versus quality with a fitted linear trend line"
+
+# Plot alcohol against wine quality because it is commonly one of the strongest predictors.
+ggplot(wine_data, aes(x = alcohol, y = quality)) +
+  geom_point(alpha = 0.20, color = "darkred") +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(
+    title = "Alcohol and Wine Quality",
+    x = "Alcohol",
+    y = "Quality"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+The alcohol plot provides a concrete example of a predictor-response relationship before the multivariable model adjusts for the rest of the chemical variables.
+
+# Traditional OLS Regression Pipeline
+
+## Full Model with All Predictors
+
+```{r}
+#| label: full-model-summary
+
+# Fit the full OLS model using all available predictors except the duplicated factor label.
+full_model <- lm(quality ~ . - wine_type, data = wine_data)
+
+# Display the full model summary.
+summary(full_model)
+```
+
+The full OLS model serves as the baseline specification. It estimates the partial association between each predictor and quality while holding the other variables constant.
+
+```{r}
+#| label: significant-predictors
+#| tbl-cap: "Statistically significant predictors in the full OLS model"
+
+# Extract the coefficient table and keep significant predictors.
+full_model_coefficients <- summary(full_model)$coefficients
+
+significant_predictors <- tibble(
+  predictor = rownames(full_model_coefficients),
+  estimate = full_model_coefficients[, 1],
+  std_error = full_model_coefficients[, 2],
+  t_value = full_model_coefficients[, 3],
+  p_value = full_model_coefficients[, 4]
+) %>%
+  filter(predictor != "(Intercept)", p_value < 0.05)
+
+kable(significant_predictors, digits = 4, caption = "Significant predictors in the full OLS model")
+```
+
+This table highlights the predictors that remain statistically associated with quality after adjustment for the rest of the model.
+
+## VIF Check for Multicollinearity
+
+```{r}
+#| label: vif-check
+#| tbl-cap: "Variance inflation factors for the full OLS model"
+
+# Compute VIF values for the full model.
+vif_values <- car::vif(full_model)
+
+vif_table <- tibble(
+  predictor = names(vif_values),
+  vif = as.numeric(vif_values)
+) %>%
+  arrange(desc(vif))
+
+kable(vif_table, digits = 2, caption = "Variance inflation factors")
+```
+
+```{r}
+#| label: vif-flags
+#| tbl-cap: "Predictors flagged by an informal VIF threshold greater than 5"
+
+# Flag predictors with elevated VIF values using a common rule-of-thumb threshold.
+high_vif_predictors <- vif_table %>%
+  filter(vif > 5)
+
+kable(high_vif_predictors, digits = 2, caption = "High-VIF predictors")
+```
+
+The VIF results help identify whether some coefficients are being inflated by predictor overlap. This is one reason the shrinkage methods later in the report are useful, since regularization can stabilize estimates when multicollinearity is present.
+
+## AIC Backward Selection
+
+```{r}
+#| label: aic-backward-selection
+
+# Run backward AIC selection starting from the full model.
+ols_final <- step(full_model, direction = "backward", trace = 1)
+
+# Display the selected model summary.
+summary(ols_final)
+```
+
+```{r}
+#| label: aic-selection-results
+#| tbl-cap: "Predictors retained and removed by backward AIC selection"
+
+# Identify which predictors were retained and which were removed.
+full_predictors <- names(coef(full_model))[-1]
+final_predictors <- names(coef(ols_final))[-1]
+removed_predictors <- setdiff(full_predictors, final_predictors)
+
+selection_results <- bind_rows(
+  tibble(status = "Retained", predictor = final_predictors),
+  tibble(status = "Removed", predictor = removed_predictors)
+)
+
+kable(selection_results, caption = "Backward AIC selection results")
+```
+
+Backward AIC selection simplifies the baseline specification by dropping predictors that contribute less under the chosen information criterion. The selected OLS model becomes the main classical-regression benchmark for the rest of the report.
+
+## Reduced Model Coefficients
+
+```{r}
+#| label: reduced-model-coefficients
+#| tbl-cap: "Coefficient estimates for the AIC-selected OLS model"
+
+# Tidy the selected OLS model coefficients and add confidence intervals.
+ols_final_coefficients <- tidy(ols_final, conf.int = TRUE)
+
+kable(ols_final_coefficients, digits = 4, caption = "AIC-selected OLS model coefficients")
+```
+
+The coefficient table supports interpretation by showing both estimated effects and confidence intervals for the final OLS model.
+
+## OLS Model Diagnostics
+
+```{r}
+#| label: ols-diagnostic-plots
+#| fig-cap: "Diagnostic plots for the AIC-selected OLS model"
+#| fig-alt: "Four-panel regression diagnostic plot including residuals, Q-Q plot, scale-location plot, and leverage plot"
+#| fig-width: 10
+#| fig-height: 8
+
+# Save current plotting settings so they can be restored afterwards.
+old_par <- par(no.readonly = TRUE)
+
+# Use a 2x2 layout with smaller margins to avoid plot window errors.
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+plot(ols_final)
+
+# Restore original plotting settings.
+par(old_par)
+```
+
+```{r}
+#| label: diagnostic-tests
+#| tbl-cap: "Formal diagnostic tests for the AIC-selected OLS model"
+
+# Apply formal diagnostic tests to the selected OLS model.
+shapiro_result <- shapiro.test(sample(residuals(ols_final), min(5000, length(residuals(ols_final)))))
+breusch_pagan_result <- bptest(ols_final)
+durbin_watson_result <- dwtest(ols_final)
+
+diagnostic_tests <- tibble(
+  test = c("Shapiro-Wilk normality", "Breusch-Pagan homoscedasticity", "Durbin-Watson independence"),
+  statistic = c(
+    unname(shapiro_result$statistic),
+    unname(breusch_pagan_result$statistic),
+    unname(durbin_watson_result$statistic)
+  ),
+  p_value = c(
+    shapiro_result$p.value,
+    breusch_pagan_result$p.value,
+    durbin_watson_result$p.value
+  )
+)
+
+kable(diagnostic_tests, digits = 4, caption = "OLS diagnostic tests")
+```
+
+The diagnostic section checks whether the selected OLS model shows obvious assumption problems. In a dataset of this size, small departures are possible, but the combined visual and formal checks still provide a useful benchmark before comparing OLS to shrinkage methods.
+
+# Shrinkage Methods
+
+## Data Preparation for `glmnet`
+
+```{r}
+#| label: glmnet-preparation
+#| tbl-cap: "Dimensions of the model matrix used for shrinkage methods"
+
+# Build the predictor matrix for glmnet and keep the response separately.
+X <- model.matrix(quality ~ . - wine_type, data = wine_data)[, -1]
+y <- wine_data$quality
+
+# Summarize the dimensions of the model matrix.
+glmnet_dimensions <- tibble(
+  rows = nrow(X),
+  columns = ncol(X),
+  response_min = min(y),
+  response_max = max(y)
+)
+
+kable(glmnet_dimensions, caption = "Model-matrix dimensions for regularization")
+```
+
+The shrinkage models use the same merged dataset, but they require a numeric model matrix rather than a formula interface. This setup preserves comparability across OLS, Ridge, Lasso, and Elastic Net.
+
+## Ridge Regression
+
+Ridge regression minimizes the penalized objective
+
+$$
+\sum_{i=1}^{n}(y_i - \hat{y}_i)^2 + \lambda \sum_{j=1}^{p} \beta_j^2,
+$$
+
+which shrinks coefficients toward zero without setting them exactly equal to zero. This is especially useful when predictors are correlated.
+
+```{r}
+#| label: ridge-regression
+#| tbl-cap: "Ridge regression coefficients at the cross-validated optimal lambda"
+
+# Fit Ridge regression with cross-validation.
+ridge_cv <- cv.glmnet(X, y, alpha = 0, nfolds = 10)
+ridge_model <- glmnet(X, y, alpha = 0, lambda = ridge_cv$lambda.min)
+
+# Extract Ridge coefficients into a tidy table.
+ridge_coefficients <- as.matrix(coef(ridge_model))
+
+ridge_coefficient_table <- tibble(
+  predictor = rownames(ridge_coefficients),
+  coefficient = ridge_coefficients[, 1]
+) %>%
+  filter(predictor != "(Intercept)") %>%
+  arrange(desc(abs(coefficient)))
+
+kable(ridge_coefficient_table, digits = 4, caption = "Ridge coefficients")
+```
+
+```{r}
+#| label: ridge-cv-plot
+#| fig-cap: "Cross-validation curve for Ridge regression"
+#| fig-alt: "Cross-validation plot for Ridge regression with vertical reference lines for lambda minimum and lambda one-standard-error"
+
+# Plot the cross-validation profile for Ridge regression.
+plot(ridge_cv, main = "Ridge Regression: Cross-Validation")
+abline(v = log(ridge_cv$lambda.min), col = "red", lty = 2)
+abline(v = log(ridge_cv$lambda.1se), col = "blue", lty = 2)
+legend("topright", legend = c("lambda min", "lambda 1se"), col = c("red", "blue"), lty = 2)
+```
+
+```{r}
+#| label: ridge-coefficient-path
+#| fig-cap: "Coefficient path for Ridge regression"
+#| fig-alt: "Coefficient path plot showing how Ridge coefficients change as the penalty parameter varies"
+
+# Plot the Ridge coefficient path across lambda values.
+ridge_path_model <- glmnet(X, y, alpha = 0)
+plot(ridge_path_model, xvar = "lambda", label = TRUE, main = "Ridge Regression: Coefficient Path")
+abline(v = log(ridge_cv$lambda.min), col = "red", lty = 2)
+```
+
+## Lasso Regression
+
+Lasso regression minimizes the penalized objective
+
+$$
+\sum_{i=1}^{n}(y_i - \hat{y}_i)^2 + \lambda \sum_{j=1}^{p} |\beta_j|,
+$$
+
+which can shrink some coefficients exactly to zero. This makes Lasso useful when variable selection is part of the modeling goal.
+
+```{r}
+#| label: lasso-regression
+#| tbl-cap: "Lasso regression coefficients at the cross-validated optimal lambda"
+
+# Fit Lasso regression with cross-validation.
+lasso_cv <- cv.glmnet(X, y, alpha = 1, nfolds = 10)
+lasso_model <- glmnet(X, y, alpha = 1, lambda = lasso_cv$lambda.min)
+
+# Extract Lasso coefficients into a tidy table.
+lasso_coefficients <- as.matrix(coef(lasso_model))
+
+lasso_coefficient_table <- tibble(
+  predictor = rownames(lasso_coefficients),
+  coefficient = lasso_coefficients[, 1]
+) %>%
+  filter(predictor != "(Intercept)") %>%
+  arrange(desc(abs(coefficient)))
+
+kable(lasso_coefficient_table, digits = 4, caption = "Lasso coefficients")
+```
+
+```{r}
+#| label: lasso-selected-variables
+#| tbl-cap: "Variables retained by Lasso"
+
+# Keep only the non-zero Lasso coefficients.
+lasso_selected_variables <- lasso_coefficient_table %>%
+  filter(coefficient != 0)
+
+kable(lasso_selected_variables, digits = 4, caption = "Variables retained by Lasso")
+```
+
+```{r}
+#| label: lasso-cv-plot
+#| fig-cap: "Cross-validation curve for Lasso regression"
+#| fig-alt: "Cross-validation plot for Lasso regression with vertical reference lines for lambda minimum and lambda one-standard-error"
+
+# Plot the cross-validation profile for Lasso regression.
+plot(lasso_cv, main = "Lasso Regression: Cross-Validation")
+abline(v = log(lasso_cv$lambda.min), col = "red", lty = 2)
+abline(v = log(lasso_cv$lambda.1se), col = "blue", lty = 2)
+legend("topright", legend = c("lambda min", "lambda 1se"), col = c("red", "blue"), lty = 2)
+```
+
+```{r}
+#| label: lasso-coefficient-path
+#| fig-cap: "Coefficient path for Lasso regression"
+#| fig-alt: "Coefficient path plot showing how Lasso coefficients change as the penalty parameter varies"
+
+# Plot the Lasso coefficient path across lambda values.
+lasso_path_model <- glmnet(X, y, alpha = 1)
+plot(lasso_path_model, xvar = "lambda", label = TRUE, main = "Lasso Regression: Coefficient Path")
+abline(v = log(lasso_cv$lambda.min), col = "red", lty = 2)
+```
+
+## Elastic Net
+
+Elastic Net combines the Ridge and Lasso penalties according to
+
+$$
+\sum_{i=1}^{n}(y_i - \hat{y}_i)^2 + \lambda \left[\alpha \sum_{j=1}^{p}|\beta_j| + (1-\alpha) \sum_{j=1}^{p}\beta_j^2\right].
+$$
+
+This method is useful when predictors are correlated but I still want some level of variable selection.
+
+```{r}
+#| label: elastic-net-fit
+#| tbl-cap: "Elastic Net coefficients at the selected alpha and lambda values"
+
+# Search over alpha values to identify a good Elastic Net specification.
+alpha_values <- seq(0.1, 0.9, by = 0.1)
+cv_results <- map_dfr(alpha_values, function(alpha_value) {
+  cv_fit <- cv.glmnet(X, y, alpha = alpha_value, nfolds = 10)
+  tibble(
+    alpha = alpha_value,
+    lambda_min = cv_fit$lambda.min,
+    mse_min = min(cv_fit$cvm)
+  )
+})
+
+# Select the alpha with the smallest cross-validated error.
+best_alpha <- cv_results$alpha[which.min(cv_results$mse_min)]
+enet_cv <- cv.glmnet(X, y, alpha = best_alpha, nfolds = 10)
+enet_model <- glmnet(X, y, alpha = best_alpha, lambda = enet_cv$lambda.min)
+
+# Extract Elastic Net coefficients into a tidy table.
+enet_coefficients <- as.matrix(coef(enet_model))
+
+enet_coefficient_table <- tibble(
+  predictor = rownames(enet_coefficients),
+  coefficient = enet_coefficients[, 1]
+) %>%
+  filter(predictor != "(Intercept)") %>%
+  arrange(desc(abs(coefficient)))
+
+kable(enet_coefficient_table, digits = 4, caption = "Elastic Net coefficients")
+```
+
+```{r}
+#| label: elastic-net-alpha-plot
+#| fig-cap: "Cross-validated MSE across Elastic Net alpha values"
+#| fig-alt: "Line plot of cross-validated mean squared error across alpha values for Elastic Net with a vertical line showing the best alpha"
+
+# Plot the alpha search results.
+ggplot(cv_results, aes(x = alpha, y = mse_min)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2.5) +
+  geom_vline(xintercept = best_alpha, color = "red", linetype = "dashed") +
+  labs(
+    title = "Elastic Net: Alpha Optimization",
+    subtitle = paste("Best alpha =", best_alpha),
+    x = "Alpha",
+    y = "Cross-validated MSE"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+#| label: elastic-net-cv-plot
+#| fig-cap: "Cross-validation curve for Elastic Net"
+#| fig-alt: "Cross-validation plot for Elastic Net with vertical reference lines for lambda minimum and lambda one-standard-error"
+
+# Plot the cross-validation profile for the chosen Elastic Net model.
+plot(enet_cv, main = paste("Elastic Net: Cross-Validation (alpha =", best_alpha, ")"))
+abline(v = log(enet_cv$lambda.min), col = "red", lty = 2)
+abline(v = log(enet_cv$lambda.1se), col = "blue", lty = 2)
+legend("topright", legend = c("lambda min", "lambda 1se"), col = c("red", "blue"), lty = 2)
+```
+
+# Model Comparison
+
+## Performance Metrics
+
+```{r}
+#| label: model-comparison-metrics
+#| tbl-cap: "Performance metrics across the selected OLS, Ridge, Lasso, and Elastic Net models"
+
+# Define a helper function to calculate comparable performance metrics.
+calculate_metrics <- function(model, model_name) {
+  if (model_name == "OLS") {
+    predictions <- predict(model, wine_data)
+    actual_values <- wine_data$quality
+    n_obs <- length(actual_values)
+    n_predictors <- length(coef(model)) - 1
+  } else {
+    predictions <- as.vector(predict(model, newx = X))
+    actual_values <- y
+    n_obs <- length(actual_values)
+    n_predictors <- sum(as.vector(coef(model))[-1] != 0)
+  }
+
+  residual_values <- actual_values - predictions
+  rss <- sum(residual_values^2)
+  tss <- sum((actual_values - mean(actual_values))^2)
+  r_squared <- 1 - rss / tss
+  adjusted_r_squared <- 1 - ((1 - r_squared) * (n_obs - 1) / (n_obs - n_predictors - 1))
+  rmse <- sqrt(mean(residual_values^2))
+  mae <- mean(abs(residual_values))
+
+  tibble(
+    model = model_name,
+    r_squared = r_squared,
+    adjusted_r_squared = adjusted_r_squared,
+    rmse = rmse,
+    mae = mae,
+    predictors = n_predictors
+  )
+}
+
+# Calculate metrics for all fitted models.
+comparison_metrics <- bind_rows(
+  calculate_metrics(ols_final, "OLS"),
+  calculate_metrics(ridge_model, "Ridge"),
+  calculate_metrics(lasso_model, "Lasso"),
+  calculate_metrics(enet_model, "Elastic Net")
+)
+
+kable(comparison_metrics, digits = 4, caption = "Performance metrics across models")
+```
+
+This table provides a direct side-by-side comparison of the competing modeling approaches. It shows whether shrinkage improves fit enough to justify the extra modeling complexity.
+
+## Visual Comparison of Model Performance
+
+```{r}
+#| label: model-performance-plots
+#| fig-cap: "Visual comparison of model performance across OLS and shrinkage methods"
+#| fig-alt: "Three vertically stacked bar charts comparing R squared values, RMSE, and number of predictors across OLS, Ridge, Lasso, and Elastic Net"
+
+# Plot R-squared values.
+p_r2 <- ggplot(
+  comparison_metrics %>%
+    select(model, r_squared, adjusted_r_squared) %>%
+    pivot_longer(-model, names_to = "metric", values_to = "value"),
+  aes(x = model, y = value, fill = metric)
+) +
+  geom_col(position = "dodge", alpha = 0.85, color = "black") +
+  scale_fill_manual(values = c("r_squared" = "#2E86AB", "adjusted_r_squared" = "#A23B72")) +
+  labs(title = "R-squared Comparison", x = NULL, y = "Value", fill = "Metric") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "bottom")
+
+# Plot RMSE values.
+p_rmse <- ggplot(comparison_metrics, aes(x = model, y = rmse, fill = model)) +
+  geom_col(alpha = 0.85, color = "black") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "RMSE Comparison", x = NULL, y = "RMSE") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none")
+
+# Plot the number of non-zero predictors used by each method.
+p_predictors <- ggplot(comparison_metrics, aes(x = model, y = predictors, fill = model)) +
+  geom_col(alpha = 0.85, color = "black") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Predictor Count Comparison", x = NULL, y = "Predictors") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "none")
+
+# Arrange the three performance plots.
+grid.arrange(p_r2, p_rmse, p_predictors, ncol = 1)
+```
+
+The visual comparison makes it easier to see the trade-off between fit and complexity. In particular, it helps distinguish a model that predicts slightly better from a model that is simpler and easier to explain.
+
+## Coefficient Comparison
+
+```{r}
+#| label: coefficient-comparison-table
+#| tbl-cap: "Coefficient comparison across OLS, Ridge, Lasso, and Elastic Net"
+
+# Extract OLS coefficients for comparison.
+ols_coefficients <- tidy(ols_final) %>%
+  filter(term != "(Intercept)") %>%
+  select(term, estimate) %>%
+  rename(OLS = estimate)
+
+# Merge coefficient tables from all models.
+all_coefficients <- ols_coefficients %>%
+  full_join(ridge_coefficient_table %>% rename(term = predictor, Ridge = coefficient), by = "term") %>%
+  full_join(lasso_coefficient_table %>% rename(term = predictor, Lasso = coefficient), by = "term") %>%
+  full_join(enet_coefficient_table %>% rename(term = predictor, `Elastic Net` = coefficient), by = "term") %>%
+  mutate(
+    Ridge = replace_na(Ridge, 0),
+    Lasso = replace_na(Lasso, 0),
+    `Elastic Net` = replace_na(`Elastic Net`, 0)
+  )
+
+kable(all_coefficients, digits = 4, caption = "Coefficient comparison across models")
+```
+
+```{r}
+#| label: coefficient-comparison-plot
+#| fig-cap: "Coefficient comparison across OLS and shrinkage methods"
+#| fig-alt: "Multi-series line plot comparing coefficients for each predictor across OLS, Ridge, Lasso, and Elastic Net"
+
+# Convert the coefficient table to long format for plotting.
+coefficient_long <- all_coefficients %>%
+  pivot_longer(-term, names_to = "model", values_to = "coefficient")
+
+# Plot the coefficient patterns across methods.
+ggplot(coefficient_long, aes(x = term, y = coefficient, color = model, group = model)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Coefficient Comparison Across Models",
+    x = "Predictor",
+    y = "Coefficient"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+```
+
+The coefficient comparison helps show how regularization changes effect sizes. Ridge tends to shrink all coefficients, while Lasso and Elastic Net may also reduce some of them to zero or near zero.
+
+## Predictions Comparison
+
+```{r}
+#| label: predictions-comparison
+#| fig-cap: "Predicted versus observed wine quality across OLS and shrinkage methods"
+#| fig-alt: "Four-panel figure comparing observed and predicted quality for OLS, Ridge, Lasso, and Elastic Net"
+
+# Store predictions from all models in the merged dataset for plotting.
+wine_data$pred_ols <- predict(ols_final, wine_data)
+wine_data$pred_ridge <- as.vector(predict(ridge_model, newx = X))
+wine_data$pred_lasso <- as.vector(predict(lasso_model, newx = X))
+wine_data$pred_enet <- as.vector(predict(enet_model, newx = X))
+
+# Build a list of predicted-versus-observed plots.
+prediction_plots <- list()
+prediction_columns <- c("pred_ols", "pred_ridge", "pred_lasso", "pred_enet")
+prediction_labels <- c("OLS", "Ridge", "Lasso", "Elastic Net")
+
+for (i in seq_along(prediction_columns)) {
+  prediction_plots[[i]] <- ggplot(wine_data, aes_string(x = "quality", y = prediction_columns[i])) +
+    geom_jitter(alpha = 0.20, width = 0.15, height = 0.15, size = 0.5) +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    labs(
+      title = prediction_labels[i],
+      x = "Observed quality",
+      y = "Predicted quality"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+
+# Arrange all prediction comparison plots together.
+grid.arrange(grobs = prediction_plots, ncol = 2)
+```
+
+These panels show how tightly each model tracks the observed quality scores. They are useful because they visualize not only average fit but also the spread of prediction errors.
+
+# Key Findings and Recommendations
+
+## Summary of Results
+
+```{r}
+#| label: summary-of-results
+#| tbl-cap: "High-level summary of the main model comparison findings"
+
+# Identify the best-performing models under selected criteria.
+best_model_by_r2 <- comparison_metrics$model[which.max(comparison_metrics$r_squared)]
+best_model_by_rmse <- comparison_metrics$model[which.min(comparison_metrics$rmse)]
+
+# Count non-zero coefficients in the sparse models.
+lasso_nonzero <- sum(lasso_coefficient_table$coefficient != 0)
+enet_nonzero <- sum(enet_coefficient_table$coefficient != 0)
+
+# Find the most consistently influential predictors across models.
+top_predictors <- all_coefficients %>%
+  mutate(
+    average_absolute_coefficient = (abs(OLS) + abs(Ridge) + abs(Lasso) + abs(`Elastic Net`)) / 4
+  ) %>%
+  arrange(desc(average_absolute_coefficient)) %>%
+  slice(1:5) %>%
+  select(term, average_absolute_coefficient)
+
+summary_results <- tibble(
+  finding = c(
+    "Best model by R-squared",
+    "Best model by RMSE",
+    "Predictors retained by AIC-selected OLS",
+    "Non-zero predictors retained by Lasso",
+    "Non-zero predictors retained by Elastic Net"
+  ),
+  value = c(
+    best_model_by_r2,
+    best_model_by_rmse,
+    length(coef(ols_final)) - 1,
+    lasso_nonzero,
+    enet_nonzero
+  )
+)
+
+kable(summary_results, caption = "High-level model comparison summary")
+```
+
+```{r}
+#| label: top-predictors-table
+#| tbl-cap: "Predictors with the largest average absolute coefficients across models"
+
+# Present the top predictors in a compact table.
+kable(top_predictors, digits = 4, caption = "Top predictors across models")
+```
+
+The overall comparison shows whether shrinkage improves predictive performance and which variables remain influential across modeling frameworks. This is especially helpful when I want to distinguish stable signals from coefficients that are sensitive to model choice.
+
+## Practical Recommendations
+
+The model results suggest that some physicochemical variables carry more consistent weight than others across OLS and regularized regression. Predictors such as alcohol, volatile acidity, sulphates, and density often remain among the most influential variables, although their exact magnitudes vary by method. In practical terms, that means the report points to a small set of recurring quality-related measurements rather than a completely unstable predictor landscape.
+
+For predictive modeling, the strongest recommendation is to prefer the model that balances fit, stability, and interpretability rather than focusing on only one metric. If the best-performing shrinkage model produces slightly better prediction with a cleaner coefficient pattern, it is a strong candidate for final reporting. If interpretability is the main priority, the AIC-selected OLS model remains useful because the coefficients are straightforward to explain and the assumptions have been checked directly.
+
+For a wine-production interpretation, the results are most useful as directional guidance rather than as a mechanical recipe. Variables that repeatedly show negative associations with quality may identify chemical patterns worth controlling more tightly, while variables with repeated positive associations may indicate features linked to stronger quality ratings in this dataset.
+
+## Model Selection Guide
+
+```{r}
+#| label: model-selection-guide
+#| tbl-cap: "Guide to when each modeling approach is most useful"
+
+# Create a compact model-selection guide based on the reference workflow.
+model_selection_guide <- tibble(
+  method = c("OLS", "Ridge", "Lasso", "Elastic Net"),
+  use_when = c(
+    "You want interpretable coefficients, formal diagnostics, and a classical regression benchmark.",
+    "You expect multicollinearity and want to keep all predictors while stabilizing coefficient estimates.",
+    "You want automatic variable selection and a sparser model.",
+    "You want both shrinkage and variable selection when predictors are correlated."
+  )
+)
+
+kable(model_selection_guide, caption = "Model selection guide")
+```
+
+This guide places the model comparison into practical context. Rather than treating one method as universally best, it links each method to the kind of analytical goal it serves most effectively.
+
+# Appendix
+
+## Session Information
+
+```{r}
+#| label: session-information
+
+# Print session information for reproducibility.
+sessionInfo()
+```
+
+# References
